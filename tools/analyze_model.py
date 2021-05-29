@@ -24,6 +24,8 @@ logger = logging.getLogger("detectron2")
 
 def setup(args):
     cfg = get_cfg()
+    # from experimental_projects.retinanet2.retinanet2.config import add_retinanet2_config
+    # add_retinanet2_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.DATALOADER.NUM_WORKERS = 0
     cfg.merge_from_list(args.opts)
