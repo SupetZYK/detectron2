@@ -10,7 +10,7 @@ from torch.nn import functional as F
 
 from detectron2.config import configurable
 # from detectron2.data.detection_utils import convert_image_to_rgb
-# from detectron2.layers import ShapeSpec, batched_nms, cat, get_norm
+from detectron2.layers import ShapeSpec, batched_nms, cat, get_norm, nonzero_tuple
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.anchor_generator import DefaultAnchorGenerator
@@ -137,6 +137,8 @@ class Retinanet2(nn.Module):
         anchor_ratios,
         anchor_scales,
         anchor_offset,
+        # loss related
+        allow_low_quality_matches,
         # input related
         pixel_mean,
         pixel_std,
@@ -156,6 +158,7 @@ class Retinanet2(nn.Module):
         self.test_score_thresh = test_score_thresh
         self.test_nms_thresh = test_nms_thresh
         self.bbox_reg_weight = bbox_reg_weight
+        self.allow_low_quality_matches = allow_low_quality_matches
 
         self.anchor_gen = Anchors(
             sizes=anchor_sizes,
@@ -203,6 +206,7 @@ class Retinanet2(nn.Module):
             'anchor_ratios': cfg.MODEL.RETINANET2.ANCHOR_RATIOS,
             'anchor_scales': cfg.MODEL.RETINANET2.ANCHOR_SCALES,
             'anchor_offset': cfg.MODEL.RETINANET2.ANCHOR_OFFSET,
+            'allow_low_quality_matches': cfg.MODEL.RETINANET2.LOW_QUALITY_MATCH,
             'pixel_mean': cfg.MODEL.RETINANET2.PIXEL_MEAN,
             'pixel_std': cfg.MODEL.RETINANET2.PIXEL_STD,
             'test_score_thresh': cfg.MODEL.RETINANET2.TEST_SCORE_THRESH,
@@ -222,10 +226,9 @@ class Retinanet2(nn.Module):
         features = self.backbone(images.tensor)
         features = [features[f] for f in self.head_in_features]
 
-        anchors = self.anchor_gen._get_anchor_boxes(input_size=(W, H), device=self.device, anchor_format='xyxy')
-
-        loc_preds = torch.cat([self.regressionModel(f) for f in features], dim=1)
-        cls_preds = torch.cat([self.classificationModel(f) for f in features], dim=1)
+        anchors = self.anchor_gen._get_anchor_boxes(input_size=(W, H), device=self.device, anchor_format='xyxy') # list
+        loc_preds = [self.regressionModel(f) for f in features]
+        cls_preds = [self.classificationModel(f) for f in features]
         if self.training:
             assert "instances" in batched_inputs[0], "Instance annotations are missing in training!"
             anno_boxes = [x["instances"].gt_boxes.tensor.to(self.device) for x in batched_inputs]
@@ -238,17 +241,18 @@ class Retinanet2(nn.Module):
             #     gt_label = gt_labels[idx]
             #     anno[idx, :gt_box.shape[0], :4] = gt_box
             #     anno[idx, :gt_box.shape[0], 4] = gt_label
+            cls_preds = torch.cat(cls_preds, dim=1)
+            loc_preds = torch.cat(loc_preds, dim=1)
+            anchors = torch.cat(anchors, dim=0)
             return self.losses(cls_preds, loc_preds, anchors, anno_boxes, anno_labels, features=features)
         else:
-            anchors_xywh = Anchors.xyxy2xywh(anchors)
+            anchors_xywh = [Anchors.xyxy2xywh(a) for a in anchors]
             results = []
             for idx in range(len(batched_inputs)):
-                final_boxes, final_labels, final_scores = self.inference_single(loc_preds[idx], cls_preds[idx], anchors_xywh)
-                result = Instances(images.image_sizes[idx])
-                result.pred_boxes = Boxes(final_boxes)
-                result.scores = final_scores
-                result.pred_classes = final_labels
-                results.append(result)
+                per_img_cls_preds = [cls_pred[idx] for cls_pred in cls_preds]
+                per_img_loc_preds = [loc_pred[idx] for loc_pred in loc_preds]
+                results_per_image = self.inference_single(anchors_xywh, per_img_cls_preds, per_img_loc_preds, images.image_sizes[idx])
+                results.append(results_per_image)
             processed_results = []
             for results_per_image, input_per_image, image_size in zip(
                 results, batched_inputs, images.image_sizes
@@ -261,42 +265,63 @@ class Retinanet2(nn.Module):
     
 
     
-    def inference_single(self, loc_preds, cls_preds, anchors):
-        assert loc_preds.ndim == 2 and cls_preds.ndim == 2, 'shape: {}, {}'.format(loc_preds.shape, cls_preds.shape)
-        boxes = self.anchor_gen.predict_transform(loc_preds, anchors, bbx_reg_weight=self.bbox_reg_weight)
-        cls_preds = torch.sigmoid(cls_preds)
-        scores, labels = cls_preds.max(1)
-        # import ipdb;ipdb.set_trace()
-        ids = torch.where(scores > self.test_score_thresh)[0]            # [#obj,]
-        scores = scores[ids]
-        labels = labels[ids]
-        boxes = boxes[ids]
+    def inference_single(self, anchors, box_cls, box_delta, image_size):
+        """[summary]
+        Args:
+            anchors (list[tensor]): [description]
+            box_cls (list(tensor)): [description]
+            box_delta (list(tensor)): [description]
+            image_size (tuple): [description]
 
-        final_labels = []
-        final_boxes = []
-        final_scores = []
-        # iter over classes
-        for i in range(cls_preds.shape[1]):
-            ids = torch.where(labels == i)[0]
-            if len(ids) == 0:
-                continue
-            tmp_labels = labels[ids]
-            tmp_boxes = boxes[ids]
-            tmp_scores = scores[ids]
-            keep = box_nms(tmp_boxes, tmp_scores, threshold=self.test_nms_thresh)
-            final_boxes.append(tmp_boxes[keep])
-            final_labels.append(tmp_labels[keep])
-            final_scores.append(tmp_scores[keep])
-        if len(final_labels) == 0:
-            final_boxes = torch.tensor([])
-            final_scores = torch.tensor([])
-            final_labels = torch.tensor([])
-        else:
-            final_labels = torch.cat(final_labels)
-            final_scores = torch.cat(final_scores)
-            final_boxes = torch.cat(final_boxes, dim=0)
-        return final_boxes, final_labels, final_scores
+        Returns:
+            [type]: [description]
+        """
+        boxes_all = []
+        scores_all = []
+        class_idxs_all = []
 
+        # Iterate over every feature level
+        for box_cls_i, box_reg_i, anchors_i in zip(box_cls, box_delta, anchors):
+            # (HxWxAxK,)
+            predicted_prob = box_cls_i.flatten().sigmoid_()
+
+            # Apply two filtering below to make NMS faster.
+            # 1. Keep boxes with confidence score higher than threshold
+            keep_idxs = predicted_prob > self.test_score_thresh
+            predicted_prob = predicted_prob[keep_idxs]
+            topk_idxs = nonzero_tuple(keep_idxs)[0]
+
+            # 2. Keep top k top scoring boxes only
+            # num_topk = min(self.test_topk_candidates, topk_idxs.size(0))
+            num_topk = topk_idxs.size(0)
+            # torch.sort is actually faster than .topk (at least on GPUs)
+            predicted_prob, idxs = predicted_prob.sort(descending=True)
+            predicted_prob = predicted_prob[:num_topk]
+            topk_idxs = topk_idxs[idxs[:num_topk]]
+
+            anchor_idxs = topk_idxs // self.num_classes
+            classes_idxs = topk_idxs % self.num_classes
+
+            box_reg_i = box_reg_i[anchor_idxs]
+            anchors_i = anchors_i[anchor_idxs]
+            # predict boxes
+            predicted_boxes = self.anchor_gen.predict_transform(box_reg_i, anchors_i)
+
+            boxes_all.append(predicted_boxes)
+            scores_all.append(predicted_prob)
+            class_idxs_all.append(classes_idxs)
+
+        boxes_all, scores_all, class_idxs_all = [
+            cat(x) for x in [boxes_all, scores_all, class_idxs_all]
+        ]
+        keep = batched_nms(boxes_all, scores_all, class_idxs_all, self.test_nms_thresh)
+        # keep = keep[: self.max_detections_per_image]
+
+        result = Instances(image_size)
+        result.pred_boxes = Boxes(boxes_all[keep])
+        result.scores = scores_all[keep]
+        result.pred_classes = class_idxs_all[keep]
+        return result
 
     def losses(self, classifications, regressions, anchors, anno_boxes, anno_labels, **kargs):
         alpha = 0.25
@@ -332,8 +357,16 @@ class Retinanet2(nn.Module):
                     neg_mask = IoU_max <= 0.4
                     ignore_mask = (IoU_max > 0.4) & (IoU_max < 0.5)
 
+                    if self.allow_low_quality_matches:
+                        _, pred_arg_max_ind = torch.max(IoU, dim=0)
+                        neg_mask[pred_arg_max_ind] = False
+                        ignore_mask[pred_arg_max_ind] = False
+                        
                     gt_labels_j[neg_mask] = self.num_classes
                     gt_labels_j[ignore_mask] = -1
+
+                    
+
 
                 
                 gt_labels.append(gt_labels_j)

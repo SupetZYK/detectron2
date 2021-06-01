@@ -1,0 +1,49 @@
+MODEL:
+  META_ARCHITECTURE: FCOS
+  # BACKBONE:
+  #   NAME: "build_torch_res_fpn_backbone"
+  # TORCH_RES_FPN:
+  #   DEPTH: 50
+  #   FPN_FS: 256
+  #   PRETRAIN: True
+  BACKBONE:
+    NAME: "build_retinanet_resnet_fpn_backbone"
+  WEIGHTS: "/data/torch_model/MSRA/R-50.pkl"
+  RESNETS:
+    OUT_FEATURES: ["res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+  FCOS:
+    # input
+    PIXEL_MEAN: [103.530, 116.280, 123.675]
+    # PIXEL_STD: [57.375, 57.120, 58.395]
+    PIXEL_STD: [1.0, 1.0, 1.0]
+    # structure
+    IN_FEATURES: ['p3', 'p4', 'p5', 'p6', 'p7']
+    FPN_FEAT_SIZE: 256
+    NUM_CLASSES: 80
+    # loss
+    OBJECT_SIZES_OF_INTEREST: [
+        [-1, 64], # p3
+        [64, 128], # p4
+        [128, 256], # p5
+        [256, 512], # p6
+        [512, 9999999], # p7
+    ]
+    CENTER_SAMPLING_RADIUS: -1
+    NORM_REG_TARGETS: False
+    # test
+    TEST_SCORE_THRESH: 0.05
+    NMS_THRESH_TEST: 0.5
+DATASETS:
+  TRAIN: ("coco_2017_train",)
+  # TRAIN: ("coco_2017_val",)
+  TEST: ("coco_2017_val",)
+SOLVER:
+  IMS_PER_BATCH: 16
+  BASE_LR: 0.01  # Note that RetinaNet uses a different default learning rate
+  STEPS: (60000, 80000)
+  MAX_ITER: 90000
+INPUT:
+  MIN_SIZE_TRAIN: (640, 672, 704, 736, 768, 800)
+VERSION: 2

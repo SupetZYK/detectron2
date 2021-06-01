@@ -15,7 +15,7 @@ from detectron2.config import get_cfg
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, launch
 from detectron2.evaluation import COCOEvaluator, verify_results
 
-from retinanet2.config import add_retinanet2_config
+from fcos.config import add_fcos_config
 
 class Trainer(DefaultTrainer):
     @classmethod
@@ -30,7 +30,7 @@ def setup(args):
     Create configs and perform basic setups.
     """
     cfg = get_cfg()
-    add_retinanet2_config(cfg)
+    add_fcos_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()

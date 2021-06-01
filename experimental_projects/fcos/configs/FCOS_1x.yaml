@@ -1,7 +1,11 @@
 MODEL:
-  META_ARCHITECTURE: Retinanet2
+  META_ARCHITECTURE: FCOS
   BACKBONE:
     NAME: "build_torch_res_fpn_backbone"
+  TORCH_RES_FPN:
+    DEPTH: 50
+    FPN_FS: 256
+    PRETRAIN: True
   # BACKBONE:
   #   NAME: "build_retinanet_resnet_fpn_backbone"
   # WEIGHTS: "/data/torch_model/MSRA/R-50.pkl"
@@ -9,11 +13,7 @@ MODEL:
   #   OUT_FEATURES: ["res3", "res4", "res5"]
   # FPN:
   #   IN_FEATURES: ["res3", "res4", "res5"]
-  TORCH_RES_FPN:
-    DEPTH: 50
-    FPN_FS: 256
-    PRETRAIN: True
-  RETINANET2:
+  FCOS:
     # input
     PIXEL_MEAN: [103.530, 116.280, 123.675]
     PIXEL_STD: [57.375, 57.120, 58.395]
@@ -22,19 +22,22 @@ MODEL:
     IN_FEATURES: ['p3', 'p4', 'p5', 'p6', 'p7']
     FPN_FEAT_SIZE: 256
     NUM_CLASSES: 80
-    # anchor
-    ANCHOR_SIZES: [32, 64, 128, 256, 512] # each for a feature map
-    ANCHOR_RATIOS: [0.5, 1., 2.]
-    ANCHOR_SCALES: !!python/object/apply:eval ["[1, pow(2, 1./3), pow(2, 2./3)]"]
-    ANCHOR_OFFSET: 0.0
     # loss
-    LOW_QUALITY_MATCH: False
+    OBJECT_SIZES_OF_INTEREST: [
+        [-1, 64], # p3
+        [64, 128], # p4
+        [128, 256], # p5
+        [256, 512], # p6
+        [512, 9999999], # p7
+    ]
+    CENTER_SAMPLING_RADIUS: -1
+    NORM_REG_TARGETS: False
     # test
     TEST_SCORE_THRESH: 0.05
     NMS_THRESH_TEST: 0.5
-    BBOX_REG_WEIGHT: [1., 1., 1., 1.]    
 DATASETS:
   TRAIN: ("coco_2017_train",)
+  # TRAIN: ("coco_2017_val",)
   TEST: ("coco_2017_val",)
 SOLVER:
   IMS_PER_BATCH: 16

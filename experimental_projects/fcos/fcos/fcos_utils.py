@@ -1,7 +1,24 @@
 import torch
-from utils.general import xywh2xyxy, xyxy2xywh
 
 INF = 999999
+
+def xyxy2xywh(x):
+    # Convert nx4 boxes from [x1, y1, x2, y2] to [x, y, w, h] where xy1=top-left, xy2=bottom-right
+    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+    y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
+    y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
+    y[..., 2] = x[..., 2] - x[..., 0]  # width
+    y[..., 3] = x[..., 3] - x[..., 1]  # height
+    return y
+
+def xywh2xyxy(x):
+    # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
+    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+    y[..., 0] = x[..., 0] - x[..., 2] / 2  # top left x
+    y[..., 1] = x[..., 1] - x[..., 3] / 2  # top left y
+    y[..., 2] = x[..., 0] + x[..., 2] / 2  # bottom right x
+    y[..., 3] = x[..., 1] + x[..., 3] / 2  # bottom right y
+    return y
 
 class FCOSLabelTarget(object):
     def __init__(self, strides, object_sizes_of_interest, nc, center_sampling_radius=-1, norm_reg_targets=False, **kwargs):
@@ -72,10 +89,9 @@ class FCOSLabelTarget(object):
                 reg_targets.append(torch.zeros(xs.shape[0], 4).to(target.device))
                 continue
             # assert targets_per_im.mode == "xyxy"
-            bboxes = target[:,1:] # xywh
-            area = bboxes[:,2] * bboxes[:,3]
-            bboxes = xywh2xyxy(bboxes)
+            bboxes = target[:,1:] # xyxy
             labels_per_im = target[:,0]
+            area = (bboxes[:,2] - bboxes[:,0]) * (bboxes[:,3] - bboxes[:,1])
 
             l = xs[:, None] - bboxes[:, 0][None]
             t = ys[:, None] - bboxes[:, 1][None]

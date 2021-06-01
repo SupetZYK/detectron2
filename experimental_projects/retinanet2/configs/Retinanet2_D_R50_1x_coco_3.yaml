@@ -1,41 +1,41 @@
 MODEL:
   META_ARCHITECTURE: Retinanet2
   BACKBONE:
-    NAME: "build_torch_res_fpn_backbone"
+    NAME: "build_retinanet_resnet_fpn_backbone"
+  WEIGHTS: "/data/torch_model/MSRA/R-50.pkl"
+  RESNETS:
+    OUT_FEATURES: ["res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
   # BACKBONE:
-  #   NAME: "build_retinanet_resnet_fpn_backbone"
-  # WEIGHTS: "/data/torch_model/MSRA/R-50.pkl"
-  # RESNETS:
-  #   OUT_FEATURES: ["res3", "res4", "res5"]
-  # FPN:
-  #   IN_FEATURES: ["res3", "res4", "res5"]
-  TORCH_RES_FPN:
-    DEPTH: 50
-    FPN_FS: 256
-    PRETRAIN: True
+  #   NAME: "build_torch_res_fpn_backbone"
+  # TORCH_RES_FPN:
+  #   DEPTH: 50
+  #   FPN_FS: 256
+  #   PRETRAIN: True
   RETINANET2:
     # input
     PIXEL_MEAN: [103.530, 116.280, 123.675]
-    PIXEL_STD: [57.375, 57.120, 58.395]
-    # PIXEL_STD: [1.0, 1.0, 1.0]
+    # PIXEL_STD: [57.375, 57.120, 58.395]
+    PIXEL_STD: [1.0, 1.0, 1.0]
     # structure
     IN_FEATURES: ['p3', 'p4', 'p5', 'p6', 'p7']
     FPN_FEAT_SIZE: 256
-    NUM_CLASSES: 80
+    NUM_CLASSES: 3
     # anchor
     ANCHOR_SIZES: [32, 64, 128, 256, 512] # each for a feature map
     ANCHOR_RATIOS: [0.5, 1., 2.]
     ANCHOR_SCALES: !!python/object/apply:eval ["[1, pow(2, 1./3), pow(2, 2./3)]"]
     ANCHOR_OFFSET: 0.0
     # loss
-    LOW_QUALITY_MATCH: False
+    LOW_QUALITY_MATCH: True
     # test
     TEST_SCORE_THRESH: 0.05
     NMS_THRESH_TEST: 0.5
-    BBOX_REG_WEIGHT: [1., 1., 1., 1.]    
+    BBOX_REG_WEIGHT: [1., 1., 1., 1.]
 DATASETS:
-  TRAIN: ("coco_2017_train",)
-  TEST: ("coco_2017_val",)
+  TRAIN: ("coco_cls_3_train",)
+  TEST: ("coco_cls_3_val",)
 SOLVER:
   IMS_PER_BATCH: 16
   BASE_LR: 0.01  # Note that RetinaNet uses a different default learning rate

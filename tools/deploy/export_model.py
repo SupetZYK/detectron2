@@ -30,6 +30,8 @@ from detectron2.utils.logger import setup_logger
 def setup_cfg(args):
     cfg = get_cfg()
     # cuda context is initialized before creating dataloader, so we don't fork anymore
+    from experimental_projects.retinanet2.retinanet2 import add_retinanet2_config
+    add_retinanet2_config(cfg)
     cfg.DATALOADER.NUM_WORKERS = 0
     cfg = add_export_config(cfg)
     add_pointrend_config(cfg)

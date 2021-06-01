@@ -26,6 +26,8 @@ def setup(args):
     cfg = get_cfg()
     # from experimental_projects.retinanet2.retinanet2.config import add_retinanet2_config
     # add_retinanet2_config(cfg)
+    from experimental_projects.fcos.fcos.config import add_fcos_config
+    add_fcos_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.DATALOADER.NUM_WORKERS = 0
     cfg.merge_from_list(args.opts)

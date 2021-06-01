@@ -2,15 +2,15 @@
 import logging
 import math
 import numpy as np
-from typing import List
+from typing import Dict, List, Tuple
 import torch
 from fvcore.nn import giou_loss, sigmoid_focal_loss_jit, smooth_l1_loss
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import functional as F
 
 from detectron2.config import configurable
 # from detectron2.data.detection_utils import convert_image_to_rgb
-# from detectron2.layers import ShapeSpec, batched_nms, cat, get_norm
+from detectron2.layers import ShapeSpec, batched_nms, cat, get_norm, nonzero_tuple
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 # from ..anchor_generator import build_anchor_generator
@@ -19,7 +19,7 @@ from detectron2.utils.comm import get_world_size
 
 import math
 import torch.distributed as dist
-from .fcos_utils import FCOSLabelTarget
+from .fcos_utils import FCOSLabelTarget, iou_loss
 
 
 __all__ = ['Retinanet2']
@@ -122,6 +122,14 @@ class ClassificationModel(nn.Module):
         centerness = self.centerness(feat) # B 1 H W
         return out, centerness.view(x.shape[0], -1, 1)
 
+class Scale(nn.Module):
+    def __init__(self, init_value=1.0):
+        super(Scale, self).__init__()
+        self.scale = nn.Parameter(torch.FloatTensor([init_value]))
+
+    def forward(self, input):
+        return input * self.scale
+
 @META_ARCH_REGISTRY.register()
 class FCOS(nn.Module):
     @configurable
@@ -155,7 +163,8 @@ class FCOS(nn.Module):
 
         self.regressionModel = RegressionModel(fpn_feat_size)
         self.classificationModel = ClassificationModel(fpn_feat_size, num_classes=num_classes)
-        self.strides = [2 ** (2+i) for i in range(len(self.head_in_features))]
+        self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(len(self.head_in_features))])
+        self.strides = [2 ** (3+i) for i in range(len(self.head_in_features))] # hard code here
         self.fcos_target = FCOSLabelTarget(
             self.strides, 
             object_sizes_of_interest, 
@@ -200,11 +209,10 @@ class FCOS(nn.Module):
             'object_sizes_of_interest': cfg.MODEL.FCOS.OBJECT_SIZES_OF_INTEREST,
             'center_sampling_radius': cfg.MODEL.FCOS.CENTER_SAMPLING_RADIUS,
             'norm_reg_targets': cfg.MODEL.FCOS.NORM_REG_TARGETS,
-            'pixel_mean': cfg.MODEL.RETINANET2.PIXEL_MEAN,
-            'pixel_std': cfg.MODEL.RETINANET2.PIXEL_STD,
-            'test_score_thresh': cfg.MODEL.RETINANET2.TEST_SCORE_THRESH,
-            'test_nms_thresh': cfg.MODEL.RETINANET2.NMS_THRESH_TEST,
-            'bbox_reg_weight': cfg.MODEL.RETINANET2.BBOX_REG_WEIGHT,
+            'pixel_mean': cfg.MODEL.FCOS.PIXEL_MEAN,
+            'pixel_std': cfg.MODEL.FCOS.PIXEL_STD,
+            'test_score_thresh': cfg.MODEL.FCOS.TEST_SCORE_THRESH,
+            'test_nms_thresh': cfg.MODEL.FCOS.NMS_THRESH_TEST,
         }
 
     def freeze_bn(self):
@@ -221,7 +229,7 @@ class FCOS(nn.Module):
 
         locations = self.compute_locations(features)
 
-        loc_preds = [self.regressionModel(f) for f in features]
+        loc_preds = [torch.exp(self.scales[i](self.regressionModel(f))) for i, f in enumerate(features)]
         cls_preds = []
         centerness = []
         for f in features:
@@ -234,17 +242,18 @@ class FCOS(nn.Module):
             targets = []
             for x in batched_inputs:
                 targets.append(
-                    torch.cat([x["instances"].gt_classes.viwe(-1, 1), x["instances"].gt_boxes.tensor], dim=1).to(self.device)
+                    torch.cat([x["instances"].gt_classes.view(-1, 1), x["instances"].gt_boxes.tensor], dim=1).to(self.device)
                 )
             # anno_boxes = [x["instances"].gt_boxes.tensor.to(self.device) for x in batched_inputs]
             # anno_labels = [x['instances'].gt_classes.to(self.device) for x in batched_inputs]
-            return self.losses(cls_preds, loc_preds, centerness, targets)
+            return self.losses(locations, cls_preds, loc_preds, centerness, targets)
         else:
             results = []
             for idx in range(len(batched_inputs)):
                 per_img_cls_preds = [cls_pred[idx] for cls_pred in cls_preds]
                 per_img_loc_preds = [loc_pred[idx] for loc_pred in loc_preds]
-                per_img_cent_preds = [cent[idx] for cen in centerness]
+                per_img_cent_preds = [cent[idx] for cent in centerness]
+                locations = [loc.view(-1, 2) for loc in locations]
                 results_per_img = self.inference_single(locations, per_img_cls_preds, per_img_loc_preds, per_img_cent_preds, images.image_sizes[idx])
                 results.append(results_per_img)
             # post process
@@ -263,7 +272,7 @@ class FCOS(nn.Module):
         for level, feat in enumerate(feature_maps):
             _, _, ny, nx = feat.shape
             yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
-            locations = torch.stack([xv, yv], dim=2).view(1, -1, 2).to(feature_map.device)
+            locations = torch.stack([xv, yv], dim=2).view(1, -1, 2).to(feat.device)
             locations = locations * self.strides[level] + self.strides[level] // 2
             all_locations.append(locations)
         return all_locations
@@ -274,7 +283,7 @@ class FCOS(nn.Module):
         locations: List[Tensor],
         box_cls: List[Tensor],
         box_delta: List[Tensor],
-        cent_pred: List(tensor),
+        cent_pred: List[Tensor],
         image_size: Tuple[int, int],
     ):
         """
@@ -299,9 +308,8 @@ class FCOS(nn.Module):
         # Iterate over every feature level
         for box_cls_i, box_reg_i, cent_i, loc_i in zip(box_cls, box_delta, cent_pred, locations):
             # (HxWxAxK,)
-            predicted_prob = box_cls_i.sigmoid_() * cent_i.sigmoid_()
+            predicted_prob = box_cls_i.sigmoid() * cent_i.sigmoid()
             predicted_prob = predicted_prob.flatten()
-
             # Apply two filtering below to make NMS faster.
             # 1. Keep boxes with confidence score higher than threshold
             keep_idxs = predicted_prob > self.test_score_thresh
@@ -309,7 +317,8 @@ class FCOS(nn.Module):
             topk_idxs = nonzero_tuple(keep_idxs)[0]
 
             # 2. Keep top k top scoring boxes only
-            num_topk = min(self.test_topk_candidates, topk_idxs.size(0))
+            # num_topk = min(self.test_topk_candidates, topk_idxs.size(0))
+            num_topk = topk_idxs.size(0)
             # torch.sort is actually faster than .topk (at least on GPUs)
             predicted_prob, idxs = predicted_prob.sort(descending=True)
             predicted_prob = predicted_prob[:num_topk]
@@ -317,7 +326,6 @@ class FCOS(nn.Module):
 
             loc_idxs = topk_idxs // self.num_classes
             classes_idxs = topk_idxs % self.num_classes
-
             box_reg_i = box_reg_i[loc_idxs]
             loc_i = loc_i[loc_idxs]
             # predict boxes
@@ -333,7 +341,7 @@ class FCOS(nn.Module):
             cat(x) for x in [boxes_all, scores_all, class_idxs_all]
         ]
         keep = batched_nms(boxes_all, scores_all, class_idxs_all, self.test_nms_thresh)
-        keep = keep[: self.max_detections_per_image]
+        # keep = keep[: self.max_detections_per_image]
 
         result = Instances(image_size)
         result.pred_boxes = Boxes(boxes_all[keep])
@@ -341,10 +349,11 @@ class FCOS(nn.Module):
         result.pred_classes = class_idxs_all[keep]
         return result
 
-    def losses(self, classifications, regressions, centerness, targets, **kargs):
+    def losses(self, locations, classifications, regressions, centerness, targets, **kargs):
         """[summary]
 
         Args:
+            locations (List(tensor)): grid points
             classifications (List(tensor)): each tensor for a prediction of a single feature map
             regressions (List(tensor)): [description]
             grids (List(tensor)): [description]
@@ -358,18 +367,15 @@ class FCOS(nn.Module):
 
         # reformat targets to List targets
         num_images = classifications[0].shape[0]
-        new_targets = [] # taregts for each image
-        for i in range(num_images):
-            new_targets.append(targets[targets[:,0]==i][:,1:])
         # prepare taregts, labels: List of tensor(bs, np); reg_targets: List of tensor(bs, np, 4)
         with torch.no_grad():
-            labels, reg_targets = self.fcos_target.prepare_targets(self.grid, new_targets)
+            labels, reg_targets = self.fcos_target.prepare_targets(locations, targets)
 
         # cat all labels and reg_targets
         labels = torch.cat(labels, -1)
         reg_targets = torch.cat(reg_targets, 1)
         valid_mask = labels >= 0
-        pos_mask = valid_mask & (labels < self.nc) 
+        pos_mask = valid_mask & (labels < self.num_classes) 
 
         # statistics
         num_pos = max(reduce_mean(pos_mask.sum()).item(), 1.0)
@@ -382,7 +388,7 @@ class FCOS(nn.Module):
         # cls loss
         valid_classifications = classifications[valid_mask]
         p = torch.sigmoid(valid_classifications)
-        gt_labels_target = F.one_hot(labels[valid_mask].long(), num_classes=self.nc + 1)[
+        gt_labels_target = F.one_hot(labels[valid_mask].long(), num_classes=self.num_classes + 1)[
             :, :-1
         ].to(valid_classifications.dtype)  # no loss for the last (background) class
         bce_loss = F.binary_cross_entropy_with_logits(valid_classifications, gt_labels_target, reduction="none")

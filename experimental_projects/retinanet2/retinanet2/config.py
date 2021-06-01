@@ -32,6 +32,10 @@ def add_retinanet2_config(cfg):
     cfg.MODEL.RETINANET2.ANCHOR_SCALES = [1., pow(2, 1./3), pow(2, 2./3)]
     cfg.MODEL.RETINANET2.ANCHOR_OFFSET = 0.
 
+    # loss related
+    # allow low quality match
+    cfg.MODEL.RETINANET2.LOW_QUALITY_MATCH = True
+
     # test config
     cfg.MODEL.RETINANET2.TEST_SCORE_THRESH = 0.05
     cfg.MODEL.RETINANET2.NMS_THRESH_TEST = 0.5

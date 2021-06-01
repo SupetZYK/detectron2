@@ -55,11 +55,11 @@ class Anchors:
             wh = self.anchor_wh[i].to(device).view(1,1,9,2).expand(fm_h,fm_w,9,2)
             box = torch.cat([xy,wh], 3)  # [x,y,w,h]
             boxes.append(box.view(-1,4))
-        res = torch.cat(boxes, 0)
+        # res = torch.cat(boxes, 0)
         if anchor_format == 'xywh':
-            return res
+            return boxes
         elif anchor_format == 'xyxy':
-            return self.xywh2xyxy(res)
+            return [self.xywh2xyxy(a) for a in boxes]
         else:
             raise ValueError()
     
