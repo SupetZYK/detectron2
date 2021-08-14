@@ -1,5 +1,4 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-import logging
 import torch
 import torch.distributed as dist
 from fvcore.nn.distributed import differentiable_all_reduce
@@ -78,15 +77,6 @@ class FrozenBatchNorm2d(nn.Module):
             if prefix + "running_var" not in state_dict:
                 state_dict[prefix + "running_var"] = torch.ones_like(self.running_var)
 
-        # NOTE: if a checkpoint is trained with BatchNorm and loaded (together with
-        # version number) to FrozenBatchNorm, running_var will be wrong. One solution
-        # is to remove the version number from the checkpoint.
-        if version is not None and version < 3:
-            logger = logging.getLogger(__name__)
-            logger.info("FrozenBatchNorm {} is upgraded to version 3.".format(prefix.rstrip(".")))
-            # In version < 3, running_var are used without +eps.
-            state_dict[prefix + "running_var"] -= self.eps
-
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
@@ -152,6 +142,8 @@ def get_norm(norm, out_channels):
             # for debugging:
             "nnSyncBN": nn.SyncBatchNorm,
             "naiveSyncBN": NaiveSyncBatchNorm,
+            # expose stats_mode N as an option to caller, required for zero-len inputs
+            "naiveSyncBN_N": lambda channels: NaiveSyncBatchNorm(channels, stats_mode="N"),
         }[norm]
     return norm(out_channels)
 
